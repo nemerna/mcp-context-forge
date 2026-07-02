@@ -5360,10 +5360,12 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                     fields_to_update = False
 
                     upstream_visibility = getattr(resource, "visibility", None)
+                    # Only consider mime_type changed if upstream provides a non-None value
+                    mime_changed = resource.mime_type is not None and existing_resource.mime_type != resource.mime_type
                     if (
                         existing_resource.name != resource.name
                         or existing_resource.description != resource.description
-                        or existing_resource.mime_type != resource.mime_type
+                        or mime_changed
                         or existing_resource.uri_template != resource.uri_template
                         or (update_visibility and upstream_visibility is not None and existing_resource.visibility != upstream_visibility)
                         or existing_resource.title != getattr(resource, "title", None)
@@ -5373,7 +5375,10 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                     if fields_to_update:
                         existing_resource.name = resource.name
                         existing_resource.description = resource.description
-                        existing_resource.mime_type = resource.mime_type
+                        # Preserve existing mime_type if upstream reports None
+                        # (avoids wiping MIME during rediscovery when backend omits it)
+                        if resource.mime_type is not None:
+                            existing_resource.mime_type = resource.mime_type
                         existing_resource.uri_template = resource.uri_template
                         existing_resource.title = getattr(resource, "title", None)
                         if update_visibility and upstream_visibility is not None:

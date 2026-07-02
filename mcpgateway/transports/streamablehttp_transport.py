@@ -2686,7 +2686,31 @@ async def read_resource(resource_uri: str) -> list[ReadResourceContents]:
             if _text:
                 return [ReadResourceContents(content=_text, mime_type=result_mime)]
 
-            # No content found
+            # Content is empty/missing - attempt to fetch from backend gateway.
+            # This handles ui:// resources whose HTML is generated on the backend
+            # MCP server rather than cached in the gateway DB.
+            resource_obj = db.execute(
+                select(DbResource).where(DbResource.uri == str(resource_uri))
+            ).scalar_one_or_none()
+            if resource_obj and resource_obj.gateway_id:
+                backend_gw = db.execute(
+                    select(DbGateway).where(DbGateway.id == resource_obj.gateway_id)
+                ).scalar_one_or_none()
+                if backend_gw:
+                    try:
+                        logger.info("Proxying resources/read to backend gateway %s for empty-cache resource %s", backend_gw.id, resource_uri)
+                        contents = await _proxy_read_resource_to_gateway(backend_gw, str(resource_uri), user_context, meta_data)
+                        if contents:
+                            first_content = contents[0]
+                            mime = getattr(first_content, "mimeType", None) or getattr(first_content, "mime_type", None) or result_mime
+                            if hasattr(first_content, "text") and first_content.text:
+                                return [ReadResourceContents(content=first_content.text, mime_type=mime)]
+                            if hasattr(first_content, "blob") and first_content.blob:
+                                return [ReadResourceContents(content=first_content.blob, mime_type=mime)]
+                    except Exception as proxy_err:
+                        logger.warning("Backend proxy fallback failed for resource %s: %s", resource_uri, proxy_err)
+
+            # No content found from either cache or backend
             logger.warning("No content returned by resource: %s", resource_uri)
             return [ReadResourceContents(content="", mime_type=result_mime)]
     except Exception as e:
