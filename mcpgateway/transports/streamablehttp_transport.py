@@ -51,6 +51,7 @@ import jwt
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.server.lowlevel import Server
+from mcp.server.lowlevel.server import ReadResourceContents
 from mcp.server.streamable_http import EventCallback, EventId, EventMessage, EventStore, StreamId
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import JSONRPCMessage, PaginatedRequestParams, ReadResourceRequest, ReadResourceRequestParams
@@ -68,6 +69,7 @@ from mcpgateway.common.models import LogLevel
 from mcpgateway.common.validators import validate_meta_data as _validate_meta_data
 from mcpgateway.config import settings
 from mcpgateway.db import Gateway as DbGateway
+from mcpgateway.db import Resource as DbResource
 from mcpgateway.db import Server as DbServer
 from mcpgateway.db import SessionLocal
 from mcpgateway.middleware.rbac import _ACCESS_DENIED_MSG
@@ -1943,6 +1945,7 @@ async def call_tool(
                 structured = None
 
             is_error = _truthy_is_error(result)
+            result_meta = _convert_meta(getattr(result, "meta", None))
 
             if is_error:
                 # Preserve the upstream error payload verbatim (#4202). Wrap
@@ -1956,6 +1959,17 @@ async def call_tool(
                     content=unstructured,
                     structuredContent=structured,
                     isError=True,
+                    **({"_meta": result_meta} if result_meta else {}),
+                )
+
+            # When _meta is present (e.g. MCP Apps ui.resourceUri), we must return
+            # a full CallToolResult so _meta is preserved in the response.
+            if result_meta:
+                return types.CallToolResult(
+                    content=unstructured,
+                    structuredContent=structured,
+                    isError=False,
+                    _meta=result_meta,
                 )
 
             # Success path: return the list/tuple shape so the MCP SDK's
@@ -2543,7 +2557,7 @@ async def list_resources() -> List[types.Resource]:
 
 
 @mcp_app.read_resource()
-async def read_resource(resource_uri: str) -> Union[str, bytes]:
+async def read_resource(resource_uri: str) -> list[ReadResourceContents]:
     """
     Reads the content of a resource specified by its URI.
 
@@ -2551,8 +2565,8 @@ async def read_resource(resource_uri: str) -> Union[str, bytes]:
         resource_uri (str): The URI of the resource to read.
 
     Returns:
-        Union[str, bytes]: The content of the resource as text or binary data.
-        Returns empty string on failure or if no content is found.
+        list[ReadResourceContents]: Resource content with proper MIME type preserved.
+        Returns empty text content on failure or if no content is found.
 
     Raises:
         PermissionError: If the user does not have the required permissions to read resources.
@@ -2564,8 +2578,6 @@ async def read_resource(resource_uri: str) -> Union[str, bytes]:
         >>> sig = inspect.signature(read_resource)
         >>> list(sig.parameters.keys())
         ['resource_uri']
-        >>> sig.return_annotation
-        typing.Union[str, bytes]
     """
     server_id, request_headers, user_context = await _get_request_context_or_default()
 
@@ -2611,7 +2623,7 @@ async def read_resource(resource_uri: str) -> Union[str, bytes]:
                     # SECURITY: Check gateway access before allowing direct proxy
                     if not await check_gateway_access(db, gateway, user_email, token_teams):
                         logger.warning("Access denied to gateway %s in direct_proxy mode for user %s", gateway_id, user_email)
-                        return ""
+                        return [ReadResourceContents(content="", mime_type=None)]
 
                     # Direct proxy mode: forward request to remote MCP server
                     # SECURITY: CWE-532 protection - Log only meta_data key names, NEVER values
@@ -2629,17 +2641,23 @@ async def read_resource(resource_uri: str) -> Union[str, bytes]:
                     _validate_meta_data(meta_data)
                     contents = await _proxy_read_resource_to_gateway(gateway, str(resource_uri), user_context, meta_data)
                     if contents:
-                        # Return first content (text or blob)
                         first_content = contents[0]
+                        mime = getattr(first_content, "mimeType", None) or getattr(first_content, "mime_type", None)
                         if hasattr(first_content, "text"):
-                            return first_content.text
+                            return [ReadResourceContents(content=first_content.text, mime_type=mime)]
                         if hasattr(first_content, "blob"):
-                            return first_content.blob
-                    return ""
+                            return [ReadResourceContents(content=first_content.blob, mime_type=mime)]
+                    return [ReadResourceContents(content="", mime_type=None)]
                 if gateway:
                     logger.debug("Gateway %s found but not in direct_proxy mode (mode: %s), using cache mode", gateway_id, gateway.gateway_mode)
                 else:
                     logger.warning("Gateway %s specified in %s header not found", gateway_id, GATEWAY_ID_HEADER)
+
+            # Look up the resource's MIME type from the DB for proper content-type propagation
+            resource_mime_type: Optional[str] = None
+            resource_row = db.execute(select(DbResource.mime_type).where(DbResource.uri == str(resource_uri))).first()
+            if resource_row:
+                resource_mime_type = resource_row[0]
 
             # Default cache mode: use database
             try:
@@ -2653,24 +2671,27 @@ async def read_resource(resource_uri: str) -> Union[str, bytes]:
                 )
             except Exception as e:
                 logger.exception("Error reading resource '%s': %s", resource_uri, e)
-                return ""
+                return [ReadResourceContents(content="", mime_type=None)]
+
+            # Prefer MIME type from the result object, fall back to DB
+            result_mime = getattr(result, "mimeType", None) or getattr(result, "mime_type", None) or resource_mime_type
 
             # Return blob content if available (binary resources)
             _blob = getattr(result, "blob", None)
             if _blob:
-                return _blob
+                return [ReadResourceContents(content=_blob, mime_type=result_mime)]
 
             # Return text content if available (text resources)
             _text = getattr(result, "text", None)
             if _text:
-                return _text
+                return [ReadResourceContents(content=_text, mime_type=result_mime)]
 
             # No content found
             logger.warning("No content returned by resource: %s", resource_uri)
-            return ""
+            return [ReadResourceContents(content="", mime_type=result_mime)]
     except Exception as e:
         logger.exception("Error reading resource '%s': %s", resource_uri, e)
-        return ""
+        return [ReadResourceContents(content="", mime_type=None)]
 
 
 @mcp_app.list_resource_templates()
