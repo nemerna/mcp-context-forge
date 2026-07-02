@@ -1872,11 +1872,12 @@ async def call_tool(
                 # Bypass SDK outputSchema re-validation for proxied responses
                 # that include structuredContent (backend already validated).
                 if structured:
-                    return types.CallToolResult(
+                    override = types.CallToolResult(
                         content=unstructured,
                         structuredContent=structured,
                         isError=False,
                     )
+                    _call_tool_result_override.set(override)
                 return unstructured
         except RuntimeError:
             # Pool not initialized - execute locally
@@ -2029,34 +2030,66 @@ async def call_tool(
                     **({"_meta": result_meta} if result_meta else {}),
                 )
 
-            # When _meta is present (e.g. MCP Apps ui.resourceUri), we must return
-            # a full CallToolResult so _meta is preserved in the response.
-            if result_meta:
-                return types.CallToolResult(
+            # When _meta is present (e.g. MCP Apps ui.resourceUri) or structuredContent
+            # from a proxied backend, bypass the SDK's outputSchema re-validation.
+            # The backend already validated its own output; re-validating here fails
+            # for MCP Apps tools whose structured_content carries widget data that
+            # differs from the outputSchema shape (e.g. x-fastmcp-wrap-result expects
+            # {"result": ...} but MCP Apps return UI payloads).
+            if result_meta or structured:
+                override = types.CallToolResult(
                     content=unstructured,
                     structuredContent=structured,
                     isError=False,
-                    _meta=result_meta,
+                    **({"_meta": result_meta} if result_meta else {}),
                 )
-
-            # When structuredContent is present from a proxied backend, bypass
-            # the SDK's outputSchema re-validation by returning CallToolResult
-            # directly. The backend already validated its own output. Re-validating
-            # here fails for MCP Apps tools whose structured_content carries widget
-            # data that differs from the outputSchema shape (e.g. x-fastmcp-wrap-result
-            # expects {"result": ...} but MCP Apps return UI payloads).
-            if structured:
-                return types.CallToolResult(
-                    content=unstructured,
-                    structuredContent=structured,
-                    isError=False,
-                )
+                _call_tool_result_override.set(override)
+                return unstructured
             return unstructured
     except Exception as e:
         logger.exception("Error calling tool '%s': %s", name, e)
         # Re-raise the exception so the MCP SDK can properly convert it to an error response
         # This ensures error details are propagated to the client instead of returning empty results
         raise
+
+
+_call_tool_result_override: contextvars.ContextVar[Optional[types.CallToolResult]] = contextvars.ContextVar(
+    "_call_tool_result_override", default=None
+)
+
+
+def _patch_call_tool_handler() -> None:
+    """Override the SDK-registered call_tool handler to bypass outputSchema re-validation.
+
+    The MCP SDK's @server.call_tool() decorator validates structuredContent against
+    the tool's outputSchema. For proxied backend responses this re-validation is
+    incorrect: the backend has already validated, and MCP Apps tools may return
+    structured_content (widget payloads) that intentionally differs from the
+    outputSchema shape (which uses x-fastmcp-wrap-result wrapping).
+
+    This patch intercepts the SDK's result and replaces it with the full
+    CallToolResult (including structuredContent and _meta) when signaled via
+    the _call_tool_result_override context variable.
+    """
+    original_handler = mcp_app.request_handlers.get(types.CallToolRequest)
+    if not original_handler:
+        return
+
+    async def patched_handler(req: types.CallToolRequest) -> types.ServerResult:
+        token = _call_tool_result_override.set(None)
+        try:
+            sdk_result = await original_handler(req)
+            override = _call_tool_result_override.get()
+            if override is not None:
+                return types.ServerResult(override)
+            return sdk_result
+        finally:
+            _call_tool_result_override.reset(token)
+
+    mcp_app.request_handlers[types.CallToolRequest] = patched_handler
+
+
+_patch_call_tool_handler()
 
 
 async def _get_request_context_or_default() -> Tuple[str, dict[str, Any], dict[str, Any]]:
