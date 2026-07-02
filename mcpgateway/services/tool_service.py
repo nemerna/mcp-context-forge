@@ -52,6 +52,17 @@ from jsonschema import Draft4Validator, Draft6Validator, Draft7Validator, valida
 from mcp import ClientSession, types
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
+
+# The gateway is a proxy — disable client-side outputSchema validation.
+# MCP Apps tools return structuredContent (widget data) that intentionally
+# differs from the x-fastmcp-wrap-result outputSchema shape. The backend
+# server is authoritative on its own output; re-validating on the client
+# side causes spurious "Output validation error" failures.
+async def _noop_validate_tool_result(self: ClientSession, name: str, result: types.CallToolResult) -> None:  # type: ignore[misc]
+    pass
+
+
+ClientSession._validate_tool_result = _noop_validate_tool_result  # type: ignore[assignment]
 import orjson
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import and_, delete, desc, or_, select
