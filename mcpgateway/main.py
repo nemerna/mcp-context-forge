@@ -225,6 +225,10 @@ from mcpgateway.validation.jsonrpc import JSONRPCError
 logging_service = LoggingService()
 logger = logging_service.get_logger("mcpgateway")
 
+# Advertise UI extension support on all outbound MCP client connections
+from mcpgateway.patches import ui_capabilities as _ui_patch  # noqa: E402
+_ui_patch.apply()
+
 # Note: Logging configuration is handled by LoggingService during startup
 # Don't use basicConfig here as it conflicts with our dual logging setup
 # Note: DB readiness probing and bootstrap_db() are deferred to the lifespan
