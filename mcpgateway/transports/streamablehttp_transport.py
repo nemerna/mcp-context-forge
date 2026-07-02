@@ -2269,7 +2269,7 @@ async def list_tools() -> List[types.Tool]:
                         inputSchema=tool.input_schema,
                         outputSchema=tool.output_schema,
                         annotations=ann or None,
-                        meta=_meta,
+                        **({"_meta": _meta} if _meta else {}),
                     ))
                 return result
         except Exception as e:
@@ -2290,7 +2290,7 @@ async def list_tools() -> List[types.Tool]:
                         inputSchema=tool.input_schema,
                         outputSchema=tool.output_schema,
                         annotations=ann or None,
-                        meta=_meta,
+                        **({"_meta": _meta} if _meta else {}),
                     ))
                 return result
         except Exception as e:
