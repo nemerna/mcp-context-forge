@@ -1,13 +1,14 @@
 """Monkey-patch MCP ClientSession.initialize to advertise UI extension support.
 
 When ContextForge proxies tool calls to backend MCP servers like insights-mcp,
-the backend checks whether the calling client supports interactive dashboards
-via the ``experimental`` field in ``ClientCapabilities``.  The upstream MCP SDK
-hardcodes ``experimental=None``, which causes backend servers to return
-text-only fallback responses instead of rich UI content.
+the backend checks whether the calling client supports interactive dashboards.
+The upstream MCP SDK hardcodes ``experimental=None`` and omits ``extensions``,
+which causes backend servers to return text-only fallback responses instead of
+rich UI content (``structuredContent``).
 
 This module wraps ``ClientSession.initialize`` so that all outbound client
-connections advertise ``{"io.modelcontextprotocol/ui": {}}``.
+connections advertise ``{"io.modelcontextprotocol/ui": {}}`` in both the
+``experimental`` and ``extensions`` fields of ``ClientCapabilities``.
 
 Import this module once at application startup (e.g. in ``main.py``).
 """
@@ -25,7 +26,7 @@ from mcp.client.session import (
 
 logger = logging.getLogger(__name__)
 
-_UI_EXPERIMENTAL = {"io.modelcontextprotocol/ui": {}}
+_UI_CAPABILITY = {"io.modelcontextprotocol/ui": {}}
 
 _original_initialize = ClientSession.initialize
 
@@ -59,9 +60,10 @@ async def _ui_aware_initialize(self) -> types.InitializeResult:
                     capabilities=types.ClientCapabilities(
                         sampling=sampling,
                         elicitation=elicitation,
-                        experimental=_UI_EXPERIMENTAL,
+                        experimental=_UI_CAPABILITY,
                         roots=roots,
                         tasks=self._task_handlers.build_capability(),
+                        extensions=_UI_CAPABILITY,
                     ),
                     clientInfo=self._client_info,
                 ),
