@@ -1869,11 +1869,14 @@ async def call_tool(
                         structuredContent=structured,
                         isError=True,
                     )
-                # Success path: return the list/tuple shape so the MCP SDK's
-                # server-side validator runs and enforces the tool's
-                # outputSchema against the structured payload.
+                # Bypass SDK outputSchema re-validation for proxied responses
+                # that include structuredContent (backend already validated).
                 if structured:
-                    return (unstructured, structured)
+                    return types.CallToolResult(
+                        content=unstructured,
+                        structuredContent=structured,
+                        isError=False,
+                    )
                 return unstructured
         except RuntimeError:
             # Pool not initialized - execute locally
@@ -2036,11 +2039,18 @@ async def call_tool(
                     _meta=result_meta,
                 )
 
-            # Success path: return the list/tuple shape so the MCP SDK's
-            # server-side validator runs and enforces the tool's
-            # outputSchema against the structured payload.
+            # When structuredContent is present from a proxied backend, bypass
+            # the SDK's outputSchema re-validation by returning CallToolResult
+            # directly. The backend already validated its own output. Re-validating
+            # here fails for MCP Apps tools whose structured_content carries widget
+            # data that differs from the outputSchema shape (e.g. x-fastmcp-wrap-result
+            # expects {"result": ...} but MCP Apps return UI payloads).
             if structured:
-                return (unstructured, structured)
+                return types.CallToolResult(
+                    content=unstructured,
+                    structuredContent=structured,
+                    isError=False,
+                )
             return unstructured
     except Exception as e:
         logger.exception("Error calling tool '%s': %s", name, e)
