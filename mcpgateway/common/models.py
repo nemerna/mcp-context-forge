@@ -385,7 +385,10 @@ class ServerCapabilities(BaseModel):
         logging (Optional[Dict[str, Any]]): Capability for logging support.
         completions (Optional[Dict[str, Any]]): Capability for completion support.
         experimental (Optional[Dict[str, Dict[str, Any]]]): Experimental capabilities.
+        extensions (Optional[Dict[str, Dict[str, Any]]]): MCP extension capabilities.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     prompts: Optional[Dict[str, Any]] = None
     resources: Optional[Dict[str, Any]] = None
@@ -393,6 +396,7 @@ class ServerCapabilities(BaseModel):
     logging: Optional[Dict[str, Any]] = None
     completions: Optional[Dict[str, Any]] = None
     experimental: Optional[Dict[str, Dict[str, Any]]] = None
+    extensions: Optional[Dict[str, Dict[str, Any]]] = None
 
 
 # Initialization types

@@ -2198,6 +2198,7 @@ class SessionRegistry(SessionBackend):
                     logging={},
                     completions={},  # Advertise completions capability per MCP spec
                     experimental=experimental,  # OAuth capability when configured
+                    extensions={"io.modelcontextprotocol/ui": {}},
                 ),
                 serverInfo=Implementation(name=settings.app_name, version=__version__),
                 instructions=("ContextForge providing federated tools, resources and prompts. Use /admin interface for configuration."),

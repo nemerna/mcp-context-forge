@@ -1,19 +1,23 @@
-"""Monkey-patch MCP ClientSession.initialize to advertise UI extension support.
+"""Monkey-patch MCP SDK to advertise UI extension support on both sides.
 
-When ContextForge proxies tool calls to backend MCP servers like insights-mcp,
-the backend checks whether the calling client supports interactive dashboards.
-The upstream MCP SDK hardcodes ``experimental=None`` and omits ``extensions``,
-which causes backend servers to return text-only fallback responses instead of
-rich UI content (``structuredContent``).
+**Client side** (outbound connections to backend MCP servers):
+    The upstream MCP SDK hardcodes ``experimental=None`` and omits
+    ``extensions``, so backend servers like insights-mcp see no UI
+    support and return text-only fallback instead of ``structuredContent``.
 
-This module wraps ``ClientSession.initialize`` so that all outbound client
-connections advertise ``{"io.modelcontextprotocol/ui": {}}`` in both the
-``experimental`` and ``extensions`` fields of ``ClientCapabilities``.
+**Server side** (inbound connections from Cursor):
+    ``Server.get_capabilities()`` doesn't include ``extensions``, so
+    Cursor doesn't know the gateway supports the ``io.modelcontextprotocol/ui``
+    protocol and won't trigger widget rendering.
+
+This module patches both ``ClientSession.initialize`` and
+``Server.get_capabilities`` so the full widget pipeline works end-to-end.
 
 Import this module once at application startup (e.g. in ``main.py``).
 """
 
 import logging
+from typing import Any, Dict
 
 from mcp import types
 from mcp.client.session import (
@@ -23,13 +27,16 @@ from mcp.client.session import (
     _default_list_roots_callback,
     _default_sampling_callback,
 )
+from mcp.server.lowlevel import NotificationOptions, Server
 
 logger = logging.getLogger(__name__)
 
-_UI_CAPABILITY = {"io.modelcontextprotocol/ui": {}}
+_UI_CAPABILITY: Dict[str, Dict[str, Any]] = {"io.modelcontextprotocol/ui": {}}
 
-_original_initialize = ClientSession.initialize
 
+# ---------------------------------------------------------------------------
+# Client-side patch: advertise UI in outbound initialize requests
+# ---------------------------------------------------------------------------
 
 async def _ui_aware_initialize(self) -> types.InitializeResult:
     """ClientSession.initialize replacement that advertises UI capabilities."""
@@ -82,8 +89,40 @@ async def _ui_aware_initialize(self) -> types.InitializeResult:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Server-side patch: advertise UI in capabilities sent to Cursor
+# ---------------------------------------------------------------------------
+
+_original_get_capabilities = Server.get_capabilities
+
+
+def _ui_aware_get_capabilities(
+    self,
+    notification_options: NotificationOptions,
+    experimental_capabilities: dict,
+) -> types.ServerCapabilities:
+    """Server.get_capabilities replacement that includes extensions."""
+    caps = _original_get_capabilities(self, notification_options, experimental_capabilities)
+    caps.extensions = _UI_CAPABILITY
+    return caps
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+_applied = False
+
+
 def apply():
-    """Apply the monkey-patch (idempotent)."""
-    if ClientSession.initialize is not _ui_aware_initialize:
-        ClientSession.initialize = _ui_aware_initialize
-        logger.info("Patched ClientSession.initialize to advertise io.modelcontextprotocol/ui")
+    """Apply both monkey-patches (idempotent)."""
+    global _applied
+    if _applied:
+        return
+    _applied = True
+
+    ClientSession.initialize = _ui_aware_initialize
+    logger.info("Patched ClientSession.initialize to advertise io.modelcontextprotocol/ui")
+
+    Server.get_capabilities = _ui_aware_get_capabilities
+    logger.info("Patched Server.get_capabilities to advertise io.modelcontextprotocol/ui")
