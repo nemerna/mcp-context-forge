@@ -1869,15 +1869,12 @@ async def call_tool(
                         structuredContent=structured,
                         isError=True,
                     )
-                # Bypass SDK outputSchema re-validation for proxied responses
-                # that include structuredContent (backend already validated).
                 if structured:
-                    override = types.CallToolResult(
+                    return types.CallToolResult(
                         content=unstructured,
                         structuredContent=structured,
                         isError=False,
                     )
-                    _call_tool_result_override.set(override)
                 return unstructured
         except RuntimeError:
             # Pool not initialized - execute locally
@@ -2030,21 +2027,18 @@ async def call_tool(
                     **({"_meta": result_meta} if result_meta else {}),
                 )
 
-            # When _meta is present (e.g. MCP Apps ui.resourceUri) or structuredContent
-            # from a proxied backend, bypass the SDK's outputSchema re-validation.
-            # The backend already validated its own output; re-validating here fails
-            # for MCP Apps tools whose structured_content carries widget data that
-            # differs from the outputSchema shape (e.g. x-fastmcp-wrap-result expects
-            # {"result": ...} but MCP Apps return UI payloads).
+            # Return the full result. Output schema validation is disabled at the SDK
+            # level (see _disable_output_schema_validation) since the gateway is a
+            # proxy and the backend validates its own output.
             if result_meta or structured:
-                override = types.CallToolResult(
+                return types.CallToolResult(
                     content=unstructured,
                     structuredContent=structured,
                     isError=False,
                     **({"_meta": result_meta} if result_meta else {}),
                 )
-                _call_tool_result_override.set(override)
-                return unstructured
+            if structured:
+                return (unstructured, structured)
             return unstructured
     except Exception as e:
         logger.exception("Error calling tool '%s': %s", name, e)
@@ -2058,38 +2052,26 @@ _call_tool_result_override: contextvars.ContextVar[Optional[types.CallToolResult
 )
 
 
-def _patch_call_tool_handler() -> None:
-    """Override the SDK-registered call_tool handler to bypass outputSchema re-validation.
+def _disable_output_schema_validation() -> None:
+    """Disable the SDK's outputSchema re-validation for proxied tool responses.
 
-    The MCP SDK's @server.call_tool() decorator validates structuredContent against
-    the tool's outputSchema. For proxied backend responses this re-validation is
-    incorrect: the backend has already validated, and MCP Apps tools may return
-    structured_content (widget payloads) that intentionally differs from the
-    outputSchema shape (which uses x-fastmcp-wrap-result wrapping).
+    The gateway is a proxy — the backend server validates its own output. The
+    SDK's call_tool decorator uses _get_cached_tool_definition() to look up tools
+    and then validates structuredContent against outputSchema. This fails for
+    MCP Apps tools that return widget data (not matching x-fastmcp-wrap-result shape).
 
-    This patch intercepts the SDK's result and replaces it with the full
-    CallToolResult (including structuredContent and _meta) when signaled via
-    the _call_tool_result_override context variable.
+    We override _get_cached_tool_definition to always return None, which causes
+    the SDK validator to skip output checks entirely. The tools/list response
+    still includes outputSchema for client consumption (clients may use it for
+    their own validation or display purposes).
     """
-    original_handler = mcp_app.request_handlers.get(types.CallToolRequest)
-    if not original_handler:
-        return
+    async def _no_output_schema_tool_definition(tool_name: str) -> None:
+        return None
 
-    async def patched_handler(req: types.CallToolRequest) -> types.ServerResult:
-        token = _call_tool_result_override.set(None)
-        try:
-            sdk_result = await original_handler(req)
-            override = _call_tool_result_override.get()
-            if override is not None:
-                return types.ServerResult(override)
-            return sdk_result
-        finally:
-            _call_tool_result_override.reset(token)
-
-    mcp_app.request_handlers[types.CallToolRequest] = patched_handler
+    mcp_app._get_cached_tool_definition = _no_output_schema_tool_definition  # type: ignore[assignment]
 
 
-_patch_call_tool_handler()
+_disable_output_schema_validation()
 
 
 async def _get_request_context_or_default() -> Tuple[str, dict[str, Any], dict[str, Any]]:
