@@ -779,7 +779,15 @@ def _serialize_mcp_tool_definition(tool: Any) -> Dict[str, Any]:
 
     annotations = data.get("annotations", getattr(tool, "annotations", None))
     if annotations is not None:
-        payload["annotations"] = annotations
+        if isinstance(annotations, dict):
+            annotations = dict(annotations)
+            _meta_val = annotations.pop("_meta", None)
+            if annotations:
+                payload["annotations"] = annotations
+            if _meta_val:
+                payload["meta"] = _meta_val
+        else:
+            payload["annotations"] = annotations
 
     return {key: value for key, value in payload.items() if value is not None}
 

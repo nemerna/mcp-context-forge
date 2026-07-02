@@ -3038,12 +3038,17 @@ class ToolService(BaseService):
 
             result: List[Dict[str, Any]] = []
             for row in rows:
+                annotations = dict(row["annotations"] or {})
+                _meta = annotations.pop("_meta", None)
                 payload: Dict[str, Any] = {
                     "name": row["name"],
                     "description": row["description"],
                     "inputSchema": row["input_schema"] or {"type": "object", "properties": {}},
-                    "annotations": row["annotations"] or {},
                 }
+                if annotations:
+                    payload["annotations"] = annotations
+                if _meta:
+                    payload["meta"] = _meta
                 if row["title"] is not None:
                     payload["title"] = row["title"]
                 if row["output_schema"] is not None:

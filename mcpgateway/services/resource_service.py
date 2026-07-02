@@ -2543,9 +2543,9 @@ class ResourceService(BaseService):
                     # Metrics are recorded in read_resource finally block for all resources
                     resource_response = await self.invoke_resource(
                         db,
-                        resource_id=getattr(content, "id"),
-                        resource_uri=getattr(content, "uri") or None,
-                        resource_template_uri=getattr(content, "text") or None,
+                        resource_id=getattr(content, "id", None),
+                        resource_uri=getattr(content, "uri", None) or None,
+                        resource_template_uri=getattr(content, "text", None) or None,
                         user_identity=user,
                         meta_data=meta_data,
                         resource_obj=resource_db,
@@ -2560,9 +2560,9 @@ class ResourceService(BaseService):
                     if hasattr(content, "blob"):
                         resource_response = await self.invoke_resource(
                             db,
-                            resource_id=getattr(content, "id"),
-                            resource_uri=getattr(content, "uri") or None,
-                            resource_template_uri=getattr(content, "blob") or None,
+                            resource_id=getattr(content, "id", None),
+                            resource_uri=getattr(content, "uri", None) or None,
+                            resource_template_uri=getattr(content, "blob", None) or None,
                             user_identity=user,
                             meta_data=meta_data,
                             resource_obj=resource_db,
@@ -2574,9 +2574,9 @@ class ResourceService(BaseService):
                     elif hasattr(content, "text"):
                         resource_response = await self.invoke_resource(
                             db,
-                            resource_id=getattr(content, "id"),
-                            resource_uri=getattr(content, "uri") or None,
-                            resource_template_uri=getattr(content, "text") or None,
+                            resource_id=getattr(content, "id", None),
+                            resource_uri=getattr(content, "uri", None) or None,
+                            resource_template_uri=getattr(content, "text", None) or None,
                             user_identity=user,
                             meta_data=meta_data,
                             resource_obj=resource_db,
@@ -2592,7 +2592,7 @@ class ResourceService(BaseService):
                     content = ResourceContent(type="resource", id=str(resource_id), uri=original_uri, text=content)
                 else:
                     # Fallback to stringified content
-                    content = ResourceContent(type="resource", id=str(resource_id) or str(content.id), uri=original_uri or content.uri, text=str(content))
+                    content = ResourceContent(type="resource", id=str(resource_id or getattr(content, "id", "")), uri=original_uri or getattr(content, "uri", ""), text=str(content))
 
                 # ═══════════════════════════════════════════════════════════════════════════
                 # POST-FETCH HOOKS: Now called AFTER content is resolved from gateway

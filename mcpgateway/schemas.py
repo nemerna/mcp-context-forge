@@ -589,6 +589,7 @@ class ToolCreate(BaseModel):
         default_factory=dict,
         description="Tool annotations for behavior hints (title, readOnlyHint, destructiveHint, idempotentHint, openWorldHint)",
     )
+    meta: Optional[Dict[str, Any]] = Field(default=None, alias="_meta", description="MCP tool metadata (e.g. ui.resourceUri for widget rendering)")
     jsonpath_filter: Optional[str] = Field(default="", description="JSON modification filter")
     auth: Optional[AuthenticationValues] = Field(None, description="Authentication credentials (Basic or Bearer Token or custom headers) if required")
     gateway_id: Optional[str] = Field(None, description="id of gateway for the tool")
@@ -1155,6 +1156,7 @@ class ToolUpdate(BaseModelWithConfigDict):
     input_schema: Optional[Dict[str, Any]] = Field(None, description="JSON Schema for validating tool parameters")
     output_schema: Optional[Dict[str, Any]] = Field(None, description="JSON Schema for validating tool output")
     annotations: Optional[Dict[str, Any]] = Field(None, description="Tool annotations for behavior hints")
+    meta: Optional[Dict[str, Any]] = Field(default=None, alias="_meta", description="MCP tool metadata (e.g. ui.resourceUri for widget rendering)")
     jsonpath_filter: Optional[str] = Field(None, description="JSON path filter for rpc tool calls")
     auth: Optional[AuthenticationValues] = Field(None, description="Authentication credentials (Basic or Bearer Token or custom headers) if required")
     gateway_id: Optional[str] = Field(None, description="id of gateway for the tool")

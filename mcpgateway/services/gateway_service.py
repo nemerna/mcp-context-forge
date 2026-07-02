@@ -5168,7 +5168,7 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
             request_type=tool.request_type,
             headers=tool.headers,
             input_schema=tool.input_schema,
-            annotations=tool.annotations,
+            annotations={**(tool.annotations or {}), **({"_meta": tool.meta} if getattr(tool, "meta", None) else {})},
             jsonpath_filter=tool.jsonpath_filter,
             auth_type=gateway.auth_type,
             auth_value=encode_auth(gateway.auth_value) if isinstance(gateway.auth_value, dict) else gateway.auth_value,
@@ -5268,7 +5268,12 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
 
                     title_changed = existing_tool.title != _resolve_tool_title(tool)
 
-                    if basic_fields_changed or schema_fields_changed or auth_fields_changed or title_changed:
+                    _new_meta = getattr(tool, "meta", None)
+                    _ann_dict = tool.annotations if isinstance(tool.annotations, dict) else (tool.annotations or {})
+                    _new_annotations = {**_ann_dict, **({"_meta": _new_meta} if _new_meta else {})}
+                    annotations_changed = (existing_tool.annotations or {}) != _new_annotations
+
+                    if basic_fields_changed or schema_fields_changed or auth_fields_changed or title_changed or annotations_changed:
                         fields_to_update = True
 
                     # Always mark tool as reachable when successfully fetched from gateway
@@ -5288,6 +5293,7 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                         existing_tool.headers = tool.headers
                         existing_tool.input_schema = tool.input_schema
                         existing_tool.output_schema = tool.output_schema
+                        existing_tool.annotations = _new_annotations
                         existing_tool.jsonpath_filter = tool.jsonpath_filter
                         existing_tool.title = _resolve_tool_title(tool)
                         existing_tool.auth_type = gateway.auth_type

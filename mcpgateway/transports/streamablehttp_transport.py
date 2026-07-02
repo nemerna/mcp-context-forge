@@ -2258,17 +2258,20 @@ async def list_tools() -> List[types.Tool]:
 
                 # Default cache mode: use database
                 tools = await tool_service.list_server_tools(db, server_id, user_email=user_email, token_teams=token_teams, _request_headers=request_headers)
-                return [
-                    types.Tool(
+                result = []
+                for tool in tools:
+                    ann = dict(tool.annotations) if isinstance(tool.annotations, dict) else (tool.annotations or {})
+                    _meta = ann.pop("_meta", None) if isinstance(ann, dict) else None
+                    result.append(types.Tool(
                         name=tool.name,
                         title=_safe_str_attr(tool, "title"),
                         description=tool.description or "",
                         inputSchema=tool.input_schema,
                         outputSchema=tool.output_schema,
-                        annotations=tool.annotations,
-                    )
-                    for tool in tools
-                ]
+                        annotations=ann or None,
+                        meta=_meta,
+                    ))
+                return result
         except Exception as e:
             logger.error("Error listing tools:%s", e)
             return []
@@ -2276,17 +2279,20 @@ async def list_tools() -> List[types.Tool]:
         try:
             async with get_db() as db:
                 tools, _ = await tool_service.list_tools(db, include_inactive=False, limit=0, user_email=user_email, token_teams=token_teams, _request_headers=request_headers)
-                return [
-                    types.Tool(
+                result = []
+                for tool in tools:
+                    ann = dict(tool.annotations) if isinstance(tool.annotations, dict) else (tool.annotations or {})
+                    _meta = ann.pop("_meta", None) if isinstance(ann, dict) else None
+                    result.append(types.Tool(
                         name=tool.name,
                         title=_safe_str_attr(tool, "title"),
                         description=tool.description or "",
                         inputSchema=tool.input_schema,
                         outputSchema=tool.output_schema,
-                        annotations=tool.annotations,
-                    )
-                    for tool in tools
-                ]
+                        annotations=ann or None,
+                        meta=_meta,
+                    ))
+                return result
         except Exception as e:
             logger.exception("Error listing tools:%s", e)
             return []
@@ -2650,12 +2656,14 @@ async def read_resource(resource_uri: str) -> Union[str, bytes]:
                 return ""
 
             # Return blob content if available (binary resources)
-            if result and result.blob:
-                return result.blob
+            _blob = getattr(result, "blob", None)
+            if _blob:
+                return _blob
 
             # Return text content if available (text resources)
-            if result and result.text:
-                return result.text
+            _text = getattr(result, "text", None)
+            if _text:
+                return _text
 
             # No content found
             logger.warning("No content returned by resource: %s", resource_uri)
