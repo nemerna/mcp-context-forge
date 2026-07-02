@@ -55,6 +55,7 @@ from mcp.server.lowlevel.server import ReadResourceContents
 from mcp.server.streamable_http import EventCallback, EventId, EventMessage, EventStore, StreamId
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import JSONRPCMessage, PaginatedRequestParams, ReadResourceRequest, ReadResourceRequestParams
+from pydantic import AnyUrl
 import orjson
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -1472,7 +1473,70 @@ async def _proxy_list_resources_to_gateway(gateway: Any, request_headers: dict, 
         return []
 
 
-async def _proxy_read_resource_to_gateway(gateway: Any, resource_uri: str, user_context: dict, meta: Optional[Any] = None) -> List[Any]:  # pylint: disable=unused-argument
+def _build_mcp_app_csp_meta(html: str) -> Optional[dict]:
+    """Extract external domains from MCP App HTML and build _meta.ui.csp.
+
+    MCP Apps run in a sandboxed iframe with deny-by-default CSP. The host uses
+    _meta.ui.csp to allowlist domains the app needs. If the backend doesn't
+    provide this metadata, we infer it from the HTML content.
+
+    Returns:
+        dict with ui.csp structure, or None if no external domains found.
+    """
+    import re  # pylint: disable=import-outside-toplevel
+
+    resource_domains: set[str] = set()
+    connect_domains: set[str] = set()
+
+    # Find external URLs in src, href, and import() statements
+    url_pattern = re.compile(r'(?:src|href)\s*=\s*["\']?(https?://[^"\'>\s]+)', re.IGNORECASE)
+    import_pattern = re.compile(r'import\s*\(\s*["\']?(https?://[^"\')\s]+)', re.IGNORECASE)
+
+    for match in url_pattern.finditer(html):
+        url = match.group(1)
+        try:
+            from urllib.parse import urlparse  # pylint: disable=import-outside-toplevel
+            parsed = urlparse(url)
+            origin = f"{parsed.scheme}://{parsed.hostname}"
+            resource_domains.add(origin)
+        except Exception:
+            pass
+
+    for match in import_pattern.finditer(html):
+        url = match.group(1)
+        try:
+            from urllib.parse import urlparse  # pylint: disable=import-outside-toplevel
+            parsed = urlparse(url)
+            origin = f"{parsed.scheme}://{parsed.hostname}"
+            resource_domains.add(origin)
+        except Exception:
+            pass
+
+    # fetch/XHR patterns for connectDomains
+    fetch_pattern = re.compile(r'fetch\s*\(\s*["\']?(https?://[^"\')\s]+)', re.IGNORECASE)
+    for match in fetch_pattern.finditer(html):
+        url = match.group(1)
+        try:
+            from urllib.parse import urlparse  # pylint: disable=import-outside-toplevel
+            parsed = urlparse(url)
+            origin = f"{parsed.scheme}://{parsed.hostname}"
+            connect_domains.add(origin)
+        except Exception:
+            pass
+
+    if not resource_domains and not connect_domains:
+        return None
+
+    csp: dict = {}
+    if resource_domains:
+        csp["resourceDomains"] = sorted(resource_domains)
+    if connect_domains:
+        csp["connectDomains"] = sorted(connect_domains)
+
+    return {"ui": {"csp": csp}}
+
+
+async def _proxy_read_resource_to_gateway(gateway: Any, resource_uri: str, user_context: dict, meta: Optional[Any] = None) -> Optional[types.ReadResourceResult]:  # pylint: disable=unused-argument
     """Proxy resources/read request directly to remote MCP gateway using MCP SDK.
 
     Args:
@@ -1482,7 +1546,7 @@ async def _proxy_read_resource_to_gateway(gateway: Any, resource_uri: str, user_
         meta: Request metadata (_meta) from the original request
 
     Returns:
-        List of content objects (TextResourceContents or BlobResourceContents) from remote server
+        Full ReadResourceResult from remote server (preserves _meta with CSP config), or None on failure.
     """
     try:
         # Prepare headers with gateway auth
@@ -1546,11 +1610,11 @@ async def _proxy_read_resource_to_gateway(gateway: Any, resource_uri: str, user_
                     result = await session.read_resource(uri=resource_uri)
 
                 logger.info("Received %s content items from gateway %s for resource %s", len(result.contents), gateway.id, resource_uri)
-                return result.contents
+                return result
 
     except Exception as e:
         logger.exception("Error proxying resources/read to gateway %s for resource %s: %s", gateway.id, resource_uri, e)
-        return []
+        return None
 
 
 def _truthy_is_error(result: Any) -> bool:
@@ -2568,6 +2632,12 @@ async def read_resource(resource_uri: str) -> list[ReadResourceContents]:
         list[ReadResourceContents]: Resource content with proper MIME type preserved.
         Returns empty text content on failure or if no content is found.
 
+    Note:
+        When the proxied backend includes _meta (e.g. MCP Apps CSP configuration),
+        this handler returns types.ReadResourceResult directly (bypassing the SDK's
+        standard wrapping) to preserve that metadata for the client. See the
+        _patch_read_resource_handler() call below this function.
+
     Raises:
         PermissionError: If the user does not have the required permissions to read resources.
 
@@ -2639,9 +2709,16 @@ async def read_resource(resource_uri: str) -> list[ReadResourceContents]:
                     )
                     # CWE-400: validate _meta limits before network I/O (bypassed in direct-proxy branch)
                     _validate_meta_data(meta_data)
-                    contents = await _proxy_read_resource_to_gateway(gateway, str(resource_uri), user_context, meta_data)
-                    if contents:
-                        first_content = contents[0]
+                    proxy_result = await _proxy_read_resource_to_gateway(gateway, str(resource_uri), user_context, meta_data)
+                    if proxy_result and proxy_result.contents:
+                        # Check if any content item or the result carries _meta (e.g. MCP Apps CSP config).
+                        # If so, signal the patched handler to use the full ReadResourceResult
+                        # which preserves _meta for the client (deny-by-default CSP in MCP Apps).
+                        has_meta = proxy_result.meta or any(getattr(c, "meta", None) for c in proxy_result.contents)
+                        if has_meta:
+                            _read_resource_result_override.set(proxy_result)
+                            return [ReadResourceContents(content="", mime_type=None)]
+                        first_content = proxy_result.contents[0]
                         mime = getattr(first_content, "mimeType", None) or getattr(first_content, "mime_type", None)
                         if hasattr(first_content, "text"):
                             return [ReadResourceContents(content=first_content.text, mime_type=mime)]
@@ -2676,6 +2753,46 @@ async def read_resource(resource_uri: str) -> list[ReadResourceContents]:
             # Prefer MIME type from the result object, fall back to DB
             result_mime = getattr(result, "mimeType", None) or getattr(result, "mime_type", None) or resource_mime_type
 
+            # For MCP App resources (text/html;profile=mcp-app), always proxy to the backend
+            # to preserve _meta.ui.csp (CSP configuration for the sandboxed iframe).
+            # The backend's resource response includes security metadata that the cache doesn't store.
+            is_mcp_app = result_mime and "profile=mcp-app" in result_mime
+            resource_obj = db.execute(
+                select(DbResource).where(DbResource.uri == str(resource_uri))
+            ).scalar_one_or_none()
+
+            if is_mcp_app and resource_obj and resource_obj.gateway_id:
+                backend_gw = db.execute(
+                    select(DbGateway).where(DbGateway.id == resource_obj.gateway_id)
+                ).scalar_one_or_none()
+                if backend_gw:
+                    try:
+                        logger.info("Proxying MCP App resources/read to backend %s for %s (bypassing cache for _meta)", backend_gw.id, resource_uri)
+                        proxy_result = await _proxy_read_resource_to_gateway(backend_gw, str(resource_uri), user_context, meta_data)
+                        if proxy_result and proxy_result.contents:
+                            has_meta = proxy_result.meta or any(getattr(c, "meta", None) for c in proxy_result.contents)
+                            if has_meta:
+                                _read_resource_result_override.set(proxy_result)
+                                return [ReadResourceContents(content="", mime_type=None)]
+                            # Backend doesn't include _meta - inject CSP based on HTML content.
+                            # MCP Apps use deny-by-default CSP; external imports will fail without this.
+                            first_content = proxy_result.contents[0]
+                            mime = getattr(first_content, "mimeType", None) or getattr(first_content, "mime_type", None) or result_mime
+                            text = getattr(first_content, "text", None) or ""
+                            csp_meta = _build_mcp_app_csp_meta(text)
+                            if csp_meta:
+                                injected = types.ReadResourceResult(
+                                    contents=[types.TextResourceContents(uri=AnyUrl(str(resource_uri)), text=text, mimeType=mime, _meta=csp_meta)],
+                                )
+                                _read_resource_result_override.set(injected)
+                                return [ReadResourceContents(content="", mime_type=None)]
+                            if text:
+                                return [ReadResourceContents(content=text, mime_type=mime)]
+                            if hasattr(first_content, "blob") and first_content.blob:
+                                return [ReadResourceContents(content=first_content.blob, mime_type=mime)]
+                    except Exception as proxy_err:
+                        logger.warning("MCP App backend proxy failed for %s, falling through to cache: %s", resource_uri, proxy_err)
+
             # Return blob content if available (binary resources)
             _blob = getattr(result, "blob", None)
             if _blob:
@@ -2684,14 +2801,21 @@ async def read_resource(resource_uri: str) -> list[ReadResourceContents]:
             # Return text content if available (text resources)
             _text = getattr(result, "text", None)
             if _text:
+                # For MCP Apps served from cache: inject CSP metadata so the host
+                # allows external scripts/styles declared in the HTML.
+                if is_mcp_app:
+                    csp_meta = _build_mcp_app_csp_meta(_text)
+                    if csp_meta:
+                        injected = types.ReadResourceResult(
+                            contents=[types.TextResourceContents(uri=AnyUrl(str(resource_uri)), text=_text, mimeType=result_mime, _meta=csp_meta)],
+                        )
+                        _read_resource_result_override.set(injected)
+                        return [ReadResourceContents(content="", mime_type=None)]
                 return [ReadResourceContents(content=_text, mime_type=result_mime)]
 
             # Content is empty/missing - attempt to fetch from backend gateway.
             # This handles ui:// resources whose HTML is generated on the backend
             # MCP server rather than cached in the gateway DB.
-            resource_obj = db.execute(
-                select(DbResource).where(DbResource.uri == str(resource_uri))
-            ).scalar_one_or_none()
             if resource_obj and resource_obj.gateway_id:
                 backend_gw = db.execute(
                     select(DbGateway).where(DbGateway.id == resource_obj.gateway_id)
@@ -2699,9 +2823,13 @@ async def read_resource(resource_uri: str) -> list[ReadResourceContents]:
                 if backend_gw:
                     try:
                         logger.info("Proxying resources/read to backend gateway %s for empty-cache resource %s", backend_gw.id, resource_uri)
-                        contents = await _proxy_read_resource_to_gateway(backend_gw, str(resource_uri), user_context, meta_data)
-                        if contents:
-                            first_content = contents[0]
+                        proxy_result = await _proxy_read_resource_to_gateway(backend_gw, str(resource_uri), user_context, meta_data)
+                        if proxy_result and proxy_result.contents:
+                            has_meta = proxy_result.meta or any(getattr(c, "meta", None) for c in proxy_result.contents)
+                            if has_meta:
+                                _read_resource_result_override.set(proxy_result)
+                                return [ReadResourceContents(content="", mime_type=None)]
+                            first_content = proxy_result.contents[0]
                             mime = getattr(first_content, "mimeType", None) or getattr(first_content, "mime_type", None) or result_mime
                             if hasattr(first_content, "text") and first_content.text:
                                 return [ReadResourceContents(content=first_content.text, mime_type=mime)]
@@ -2716,6 +2844,41 @@ async def read_resource(resource_uri: str) -> list[ReadResourceContents]:
     except Exception as e:
         logger.exception("Error reading resource '%s': %s", resource_uri, e)
         return [ReadResourceContents(content="", mime_type=None)]
+
+
+_read_resource_result_override: contextvars.ContextVar[Optional[types.ReadResourceResult]] = contextvars.ContextVar(
+    "_read_resource_result_override", default=None
+)
+
+
+def _patch_read_resource_handler() -> None:
+    """Override the SDK-registered read_resource handler to support _meta forwarding.
+
+    The standard @server.read_resource() decorator strips _meta from the response
+    because it creates fresh TextResourceContents without metadata. MCP Apps require
+    _meta.ui.csp to declare allowed CSP domains for the sandboxed iframe, so we must
+    intercept the case where read_resource() signals a full ReadResourceResult should
+    be returned (via context variable) and bypass the SDK's standard wrapping.
+    """
+    original_handler = mcp_app.request_handlers.get(types.ReadResourceRequest)
+    if not original_handler:
+        return
+
+    async def patched_handler(req: types.ReadResourceRequest) -> types.ServerResult:
+        token = _read_resource_result_override.set(None)
+        try:
+            sdk_result = await original_handler(req)
+            override = _read_resource_result_override.get()
+            if override is not None:
+                return types.ServerResult(override)
+            return sdk_result
+        finally:
+            _read_resource_result_override.reset(token)
+
+    mcp_app.request_handlers[types.ReadResourceRequest] = patched_handler
+
+
+_patch_read_resource_handler()
 
 
 @mcp_app.list_resource_templates()
