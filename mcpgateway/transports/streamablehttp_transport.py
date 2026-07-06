@@ -191,6 +191,29 @@ def _safe_str_attr(obj: Any, attr: str) -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
+def _enrich_meta_for_chatgpt(meta: Optional[dict]) -> Optional[dict]:
+    """Add openai/outputTemplate to _meta when ui.resourceUri is present.
+
+    ChatGPT looks for _meta["openai/outputTemplate"] to identify which resource
+    to render as a widget. The open MCP Apps standard uses _meta.ui.resourceUri.
+    This function ensures both are present so the gateway is compatible with
+    both Cursor and ChatGPT.
+
+    Args:
+        meta: The tool's _meta dict, or None.
+
+    Returns:
+        The enriched _meta dict, or None if input was None.
+    """
+    if not meta or not isinstance(meta, dict):
+        return meta
+    ui = meta.get("ui")
+    if isinstance(ui, dict) and "resourceUri" in ui and "openai/outputTemplate" not in meta:
+        meta = dict(meta)
+        meta["openai/outputTemplate"] = ui["resourceUri"]
+    return meta
+
+
 def _to_mcp_prompt(prompt: Any) -> types.Prompt:
     """Convert an internal prompt object to the MCP transport model.
 
@@ -1408,7 +1431,15 @@ async def _proxy_list_tools_to_gateway(gateway: Any, request_headers: dict, user
 
                 # List tools with _meta forwarded
                 result = await session.list_tools(params=_build_paginated_params(meta))
-                return result.tools
+                # Enrich _meta with openai/outputTemplate for ChatGPT compatibility
+                enriched_tools = []
+                for tool in result.tools:
+                    tool_meta = getattr(tool, "meta", None)
+                    enriched = _enrich_meta_for_chatgpt(tool_meta) if isinstance(tool_meta, dict) else tool_meta
+                    if enriched and enriched is not tool_meta:
+                        tool = tool.model_copy(update={"meta": enriched})
+                    enriched_tools.append(tool)
+                return enriched_tools
 
     except Exception as e:
         logger.exception("Error proxying tools/list to gateway %s: %s", gateway.id, e)
@@ -1855,25 +1886,21 @@ async def call_tool(
                 structured = result_data.get("structuredContent") or result_data.get("structured_content")
                 if not isinstance(structured, dict):
                     structured = None
+                fwd_meta = _enrich_meta_for_chatgpt(result_data.get("_meta"))
                 is_error = bool(result_data.get("isError") or result_data.get("is_error"))
                 if is_error:
-                    # Preserve the upstream error payload verbatim (#4202). Wrap
-                    # in CallToolResult so the MCP SDK's server-side
-                    # ``isinstance(results, types.CallToolResult)`` short-circuit
-                    # (in ``mcp.server.lowlevel.server``) skips re-validation
-                    # and doesn't clobber the message with "Output validation
-                    # error: outputSchema defined but no structured output
-                    # returned".
                     return types.CallToolResult(
                         content=unstructured,
                         structuredContent=structured,
                         isError=True,
+                        **({"_meta": fwd_meta} if fwd_meta else {}),
                     )
-                if structured:
+                if structured or fwd_meta:
                     return types.CallToolResult(
                         content=unstructured,
                         structuredContent=structured,
                         isError=False,
+                        **({"_meta": fwd_meta} if fwd_meta else {}),
                     )
                 return unstructured
         except RuntimeError:
@@ -2010,7 +2037,7 @@ async def call_tool(
                 structured = None
 
             is_error = _truthy_is_error(result)
-            result_meta = _convert_meta(getattr(result, "meta", None))
+            result_meta = _enrich_meta_for_chatgpt(_convert_meta(getattr(result, "meta", None)))
 
             if is_error:
                 # Preserve the upstream error payload verbatim (#4202). Wrap
@@ -2364,7 +2391,7 @@ async def list_tools() -> List[types.Tool]:
                 result = []
                 for tool in tools:
                     ann = dict(tool.annotations) if isinstance(tool.annotations, dict) else (tool.annotations or {})
-                    _meta = ann.pop("_meta", None) if isinstance(ann, dict) else None
+                    _meta = _enrich_meta_for_chatgpt(ann.pop("_meta", None) if isinstance(ann, dict) else None)
                     result.append(types.Tool(
                         name=tool.name,
                         title=_safe_str_attr(tool, "title"),
@@ -2385,7 +2412,7 @@ async def list_tools() -> List[types.Tool]:
                 result = []
                 for tool in tools:
                     ann = dict(tool.annotations) if isinstance(tool.annotations, dict) else (tool.annotations or {})
-                    _meta = ann.pop("_meta", None) if isinstance(ann, dict) else None
+                    _meta = _enrich_meta_for_chatgpt(ann.pop("_meta", None) if isinstance(ann, dict) else None)
                     result.append(types.Tool(
                         name=tool.name,
                         title=_safe_str_attr(tool, "title"),
@@ -2781,7 +2808,8 @@ async def read_resource(resource_uri: str) -> list[ReadResourceContents]:
             # For MCP App resources (text/html;profile=mcp-app), always proxy to the backend
             # to preserve _meta.ui.csp (CSP configuration for the sandboxed iframe).
             # The backend's resource response includes security metadata that the cache doesn't store.
-            is_mcp_app = result_mime and "profile=mcp-app" in result_mime
+            # Recognize both MCP Apps standard MIME and ChatGPT's skybridge format.
+            is_mcp_app = result_mime and ("profile=mcp-app" in result_mime or "skybridge" in result_mime)
             resource_obj = db.execute(
                 select(DbResource).where(DbResource.uri == str(resource_uri))
             ).scalar_one_or_none()
